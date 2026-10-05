@@ -1,17 +1,22 @@
 # ============================================================
-# Screen
+# Screen / Game Window Size
 # ============================================================
 
-SCREEN_WIDTH = 1920
-SCREEN_HEIGHT = 1080
+GAME_WIDTH = 1920
+GAME_HEIGHT = 1080
+
+# Compatibility alias
+SCREEN_WIDTH = GAME_WIDTH
+SCREEN_HEIGHT = GAME_HEIGHT
 
 
 # ============================================================
 # Camera
 # ============================================================
 
-CAMERA_URL = "http://172.30.2.62:8080/video"
+#CAMERA_URL = "http://172.30.2.62:8080/video"
 # CAMERA_URL = "http://192.168.1.5:8080/video"
+CAMERA_URL = "http://192.168.1.194:4747/video"
 
 CAMERA_CONNECT_RETRY_SECONDS = 2.0
 
@@ -123,20 +128,21 @@ DETECTED_OBSTACLE_PAINT_INSET_RATIO = 0.22
 # Ball physics
 # ============================================================
 
-BALL_RADIUS = 15
+BALL_RADIUS = 16
 BALL_RADIUS_VARIATION = 0.25
 
-BALL_GRAVITY = 900
+GRAVITY = 900
+BALL_GRAVITY = GRAVITY
 
-BALL_RESTITUTION = 0.78
-BALL_REST_SPEED = 55.0
+BALL_RESTITUTION = 1.0
+BALL_REST_SPEED = 30.0
 
-BALL_FRICTION = 0.04
+BALL_FRICTION = 0.0
 
 BALL_MAX_SPEED = 2400.0
 
 BALL_BALL_COLLISION_ENABLED = True
-BALL_BALL_RESTITUTION = 0.9
+BALL_BALL_RESTITUTION = 0.95
 
 PHYSICS_MAX_STEP_SECONDS = 1.0 / 240.0
 
@@ -145,7 +151,8 @@ PHYSICS_MAX_STEP_SECONDS = 1.0 / 240.0
 # Ball spawning and stuck balls
 # ============================================================
 
-BALL_SPAWN_INTERVAL_SECONDS = 3.0
+BALL_SPAWN_INTERVAL = 3.0
+BALL_SPAWN_INTERVAL_SECONDS = BALL_SPAWN_INTERVAL
 
 MAX_SIMULTANEOUS_BALLS = 12
 
@@ -156,7 +163,9 @@ BALL_SPAWN_VELOCITY_JITTER = 60.0
 BALL_STUCK_DISTANCE = 30.0
 BALL_STUCK_TIMEOUT_SECONDS = 8.0
 
-BALL_MAX_LIFETIME_SECONDS = 60.0
+BALL_LIFETIME = 10.0
+BALL_MAX_LIFETIME_SECONDS = BALL_LIFETIME
+
 
 
 # ============================================================

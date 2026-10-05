@@ -253,3 +253,172 @@ def extract_obb(obstacle):
         return None
 
     return center_x, center_y, rect_long, rect_short, angle
+
+
+# ============================================================
+# Continuous Collision Detection (CCD) helpers from version_1.py
+# ============================================================
+
+EPS = 1e-9
+
+
+class Segment:
+    """A directed 2D line segment between (x1, y1) and (x2, y2)."""
+
+    __slots__ = ("x1", "y1", "x2", "y2")
+
+    def __init__(self, x1: float, y1: float, x2: float, y2: float):
+        self.x1 = float(x1)
+        self.y1 = float(y1)
+        self.x2 = float(x2)
+        self.y2 = float(y2)
+
+    @property
+    def dx(self) -> float:
+        return self.x2 - self.x1
+
+    @property
+    def dy(self) -> float:
+        return self.y2 - self.y1
+
+
+def dot(ax: float, ay: float, bx: float, by: float) -> float:
+    return ax * bx + ay * by
+
+
+def unit(vx: float, vy: float) -> tuple[float, float]:
+    length = math.hypot(vx, vy)
+    return (vx / length, vy / length) if length > 0 else (0.0, 0.0)
+
+
+def ray_hit_circle(
+    ox: float, oy: float,
+    vx: float, vy: float,
+    cx: float, cy: float,
+    r: float
+) -> tuple[bool, float, float, float]:
+    """
+    Ray from O along displacement V intersects circle at C with radius r.
+    Returns (hit, t, nx, ny) with t in [0, 1].
+    Normal is outward from circle center at hit point.
+    """
+    fx = ox - cx
+    fy = oy - cy
+
+    a = dot(vx, vy, vx, vy)
+    b = 2.0 * dot(fx, fy, vx, vy)
+    c = dot(fx, fy, fx, fy) - r * r
+
+    if a < EPS:
+        return (False, 0.0, 0.0, 0.0)
+
+    disc = b * b - 4.0 * a * c
+    if disc < 0.0:
+        return (False, 0.0, 0.0, 0.0)
+
+    sqrt_disc = math.sqrt(disc)
+    t1 = (-b - sqrt_disc) / (2.0 * a)
+    t2 = (-b + sqrt_disc) / (2.0 * a)
+
+    t = None
+    if 0.0 <= t1 <= 1.0:
+        t = t1
+    elif 0.0 <= t2 <= 1.0:
+        t = t2
+
+    if t is None:
+        return (False, 0.0, 0.0, 0.0)
+
+    hx = ox + vx * t
+    hy = oy + vy * t
+    nx, ny = unit(hx - cx, hy - cy)
+    return (True, t, nx, ny)
+
+
+def swept_ball_vs_segment(
+    ox: float, oy: float,
+    vx: float, vy: float,
+    r: float,
+    seg: Segment
+) -> tuple[bool, float, float, float]:
+    """
+    Swept collision of moving ball center (O to O+V) vs capsule around segment (radius r).
+    Returns earliest hit (hit, t, nx, ny) where normal points AWAY from segment surface.
+    """
+    ax, ay = seg.x1, seg.y1
+    bx, by = seg.x2, seg.y2
+    sx, sy = bx - ax, by - ay
+    L = math.hypot(sx, sy)
+    if L < EPS:
+        return ray_hit_circle(ox, oy, vx, vy, ax, ay, r)
+
+    tx, ty = sx / L, sy / L
+    nx0, ny0 = -ty, tx
+
+    relx, rely = ox - ax, oy - ay
+    u0 = dot(relx, rely, tx, ty)
+    d0 = dot(relx, rely, nx0, ny0)
+
+    vu = dot(vx, vy, tx, ty)
+    vd = dot(vx, vy, nx0, ny0)
+
+    best_hit = (False, 1.0, 0.0, 0.0)
+
+    # 1) Infinite strip lines
+    if abs(vd) > EPS:
+        for sign in (+1.0, -1.0):
+            t = (sign * r - d0) / vd
+            if 0.0 <= t <= 1.0:
+                u = u0 + vu * t
+                if 0.0 <= u <= L:
+                    nx = sign * nx0
+                    ny = sign * ny0
+                    if t < best_hit[1]:
+                        best_hit = (True, t, nx, ny)
+
+    # 2) End caps
+    h1 = ray_hit_circle(ox, oy, vx, vy, ax, ay, r)
+    if h1[0] and h1[1] < best_hit[1]:
+        best_hit = h1
+
+    h2 = ray_hit_circle(ox, oy, vx, vy, bx, by, r)
+    if h2[0] and h2[1] < best_hit[1]:
+        best_hit = h2
+
+    return best_hit
+
+
+def reflect(vx: float, vy: float, nx: float, ny: float) -> tuple[float, float]:
+    """Perfect elastic reflection of velocity vector across surface normal (nx, ny)."""
+    vn = dot(vx, vy, nx, ny)
+    return (vx - 2.0 * vn * nx, vy - 2.0 * vn * ny)
+
+
+def obb_to_segments(center_x: float, center_y: float, rect_long: float, rect_short: float, angle_degrees: float) -> list[Segment]:
+    """Convert an oriented rectangle obstacle into 4 directed boundary Segments."""
+    corners = obb_corners(center_x, center_y, rect_long, rect_short, angle_degrees)
+    return [
+        Segment(corners[0][0], corners[0][1], corners[1][0], corners[1][1]),
+        Segment(corners[1][0], corners[1][1], corners[2][0], corners[2][1]),
+        Segment(corners[2][0], corners[2][1], corners[3][0], corners[3][1]),
+        Segment(corners[3][0], corners[3][1], corners[0][0], corners[0][1]),
+    ]
+
+
+def build_boundary_segments(width: float, height: float, margin: float = 0.0) -> list[Segment]:
+    """
+    Construct 4 closed outer boundary segments around the screen.
+    This creates an inescapable box for balls.
+    """
+    min_x = margin
+    min_y = margin
+    max_x = width - margin
+    max_y = height - margin
+
+    return [
+        Segment(min_x, min_y, max_x, min_y),  # Top wall
+        Segment(max_x, min_y, max_x, max_y),  # Right wall
+        Segment(max_x, max_y, min_x, max_y),  # Bottom wall
+        Segment(min_x, max_y, min_x, min_y),  # Left wall
+    ]
+
