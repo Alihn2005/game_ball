@@ -84,9 +84,10 @@ class Renderer:
         # Exclusive SDL fullscreen needs a real video-mode switch,
         # which is unreliable on several X11/Wayland/XWayland driver
         # combinations (blank frames, crashes on exit).
+        self.fullscreen = False
+
         self.screen = pygame.display.set_mode(
-            (SCREEN_WIDTH, SCREEN_HEIGHT),
-            pygame.NOFRAME,
+            (SCREEN_WIDTH, SCREEN_HEIGHT)
         )
 
         pygame.mouse.set_visible(False)
@@ -131,41 +132,31 @@ class Renderer:
         self._glow_cache = {}
         self._color_cache = {}
 
+    def toggle_fullscreen(self):
+        self.fullscreen = not self.fullscreen
+
+        if self.fullscreen:
+            self.screen = pygame.display.set_mode(
+                (SCREEN_WIDTH, SCREEN_HEIGHT),
+                pygame.NOFRAME,
+            )
+        else:
+            self.screen = pygame.display.set_mode(
+                (SCREEN_WIDTH, SCREEN_HEIGHT)
+            )
+
+        self._screen_rect = pygame.Rect(
+            0,
+            0,
+            SCREEN_WIDTH,
+            SCREEN_HEIGHT,
+        )
+
+        self.force_full_repaint()
+    
     def _build_background(self):
-        # The permanent calibration border (pink outer ring, white
-        # inner ring) around a black interior, rendered once.
-        outer = CALIBRATION_OUTER_BORDER_SIZE
-        inner = CALIBRATION_INNER_BORDER_SIZE
-        total = outer + inner
-
-        surface = pygame.Surface(
-            (SCREEN_WIDTH, SCREEN_HEIGHT)
-        )
-
-        surface.fill(CALIBRATION_PATTERN_OUTER_COLOR)
-
-        pygame.draw.rect(
-            surface,
-            CALIBRATION_PATTERN_INNER_COLOR,
-            (
-                outer,
-                outer,
-                SCREEN_WIDTH - 2 * outer,
-                SCREEN_HEIGHT - 2 * outer,
-            ),
-        )
-
-        pygame.draw.rect(
-            surface,
-            BACKGROUND_COLOR,
-            (
-                total,
-                total,
-                SCREEN_WIDTH - 2 * total,
-                SCREEN_HEIGHT - 2 * total,
-            ),
-        )
-
+        surface = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT))
+        surface.fill(BACKGROUND_COLOR)
         return surface.convert()
 
     # ========================================================

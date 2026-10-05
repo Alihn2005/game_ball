@@ -219,6 +219,9 @@ class Game:
                 if event.key == pygame.K_q:
                     self.running = False
 
+                elif event.key == pygame.K_f:
+                    self.renderer.toggle_fullscreen()
+
                 elif event.key in (
                     pygame.K_c,
                     pygame.K_ESCAPE,
