@@ -15,11 +15,9 @@ from rendering import Renderer
 
 from config import (
     CAMERA_URL,
-    GAME_WIDTH,
-    GAME_HEIGHT,
-    BALL_SPAWN_INTERVAL,
+    SCREEN_WIDTH,
+    SCREEN_HEIGHT,
     BALL_SPAWN_INTERVAL_SECONDS,
-    BALL_LIFETIME,
 )
 
 
@@ -55,8 +53,8 @@ class Game:
         )
 
         self.physics = PhysicsWorld(
-            GAME_WIDTH,
-            GAME_HEIGHT,
+            SCREEN_WIDTH,
+            SCREEN_HEIGHT,
         )
 
         self.effects = Effects()

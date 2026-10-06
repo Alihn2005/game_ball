@@ -11,13 +11,23 @@
 # How it decides, in order (each step exists because a real
 # exhibition hall breaks the simpler version):
 #
-#   1. Find generous "maybe" blobs: anything brightish and not very
-#      colored, inside the calibration border. The area the game
-#      itself painted white for already-detected stickers is blanked
-#      out first, otherwise a removed sticker would be "seen" forever
-#      in its own painted white (see DETECTED_OBSTACLE_PAINT_*).
+#   1. Find generous "maybe" blobs: anything LOCALLY brighter than
+#      its own immediate surroundings and not very colored, inside
+#      the calibration border (see imaging.py - brightness and color
+#      are measured in CIELAB, not HSV, specifically because that
+#      separates the two cleanly). "Locally brighter" rather than
+#      "brighter than one fixed number for the whole frame" is what
+#      lets a sticker sitting in a dimmer part of the hall still be
+#      found - a global floor would simply never see it, no matter
+#      how good every later step is. The area the game itself
+#      painted white for already-detected stickers is blanked out
+#      first, otherwise a removed sticker would be "seen" forever in
+#      its own painted white (see DETECTED_OBSTACLE_PAINT_*), and any
+#      small hole a glare reflection punches through a blob (or a
+#      thin glare streak that splits it in two) is patched before
+#      measuring it (see imaging.fill_holes).
 #
-#   2. Re-draw each blob's edge at the half-way brightness between
+#   2. Re-draw each blob's edge at the half-way lightness between
 #      that blob's own paper brightness and the dark screen beside
 #      it. A dim sticker in a shadowy corner and an identical one
 #      under a spotlight then come out the SAME size - a fixed
@@ -52,6 +62,8 @@ from collections import deque
 import cv2
 import numpy as np
 
+import imaging
+
 from geometry import (
     normalize_angle,
     blend_angle,
@@ -68,11 +80,14 @@ from config import (
     DETECTION_SCALE,
     MIN_OBSTACLE_AREA,
     MAX_OBSTACLE_AREA,
-    OBSTACLE_COARSE_BRIGHTNESS,
-    OBSTACLE_COARSE_SATURATION,
+    OBSTACLE_ADAPTIVE_OFFSET,
+    OBSTACLE_MIN_ABSOLUTE_LIGHTNESS,
+    OBSTACLE_ADAPTIVE_BLOCK_SPAN,
+    OBSTACLE_ADAPTIVE_DEFAULT_SHORT_SIDE,
+    OBSTACLE_COARSE_CHROMA_MAX,
     OBSTACLE_EDGE_LEVEL,
     MIN_OBSTACLE_BRIGHTNESS,
-    MAX_OBSTACLE_SATURATION,
+    MAX_OBSTACLE_CHROMA,
     MIN_OBSTACLE_RECTANGULARITY,
     MIN_OBSTACLE_SOLIDITY,
     MAX_OBSTACLE_ASPECT_RATIO,
@@ -189,11 +204,33 @@ class Detector:
                 float(min(long_side, short_side)),
             )
 
+        # What "white" currently looks like to the camera, as a LAB
+        # (a*, b*) point - see Calibration.white_reference(). Starts
+        # at neutral (128, 128) and is kept updated by whoever drives
+        # this Detector (vision.py); NOT reset by reset() below,
+        # since it describes the room's current lighting, not
+        # anything about where the stickers are.
+        self._white_a = 128.0
+        self._white_b = 128.0
+
         self.reset()
 
     # ========================================================
     # Public API
     # ========================================================
+
+    def set_white_reference(self, reference_ab):
+        """
+        Update what "white" currently looks like to the camera (see
+        Calibration.white_reference()). Falls back to LAB neutral
+        (128, 128) if None (not measured yet, or adaptive hue/white
+        learning is disabled) - the same as the old fixed behavior.
+        """
+        if reference_ab is None:
+            self._white_a = 128.0
+            self._white_b = 128.0
+        else:
+            self._white_a, self._white_b = reference_ab
 
     def reset(self):
         self.tracks = []
@@ -245,22 +282,48 @@ class Detector:
     # ========================================================
 
     def _find_candidates(self, frame):
-        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        lightness, a_channel, b_channel = imaging.to_lab(frame)
 
-        saturation = hsv[:, :, 1]
+        lightness = cv2.GaussianBlur(lightness, (3, 3), 0)
 
-        value = cv2.GaussianBlur(hsv[:, :, 2], (3, 3), 0)
+        chroma = np.clip(
+            imaging.chroma(
+                a_channel,
+                b_channel,
+                self._white_a,
+                self._white_b,
+            ),
+            0,
+            255,
+        ).astype(np.uint8)
 
-        mask = cv2.inRange(
-            value,
-            OBSTACLE_COARSE_BRIGHTNESS,
+        # "Locally brighter than its own neighborhood" (not "above
+        # one fixed brightness for the whole frame") - see the
+        # module docstring and config.py's OBSTACLE_ADAPTIVE_* for
+        # why. A plain floor is still kept underneath it purely as a
+        # noise guard: without it, sensor noise inside a totally
+        # dark, sticker-free patch of screen can register as
+        # "locally brighter than its (equally dark) surroundings"
+        # even though nothing is actually there.
+        local = cv2.adaptiveThreshold(
+            lightness,
+            255,
+            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY,
+            self._adaptive_block_size(),
+            -OBSTACLE_ADAPTIVE_OFFSET,
+        )
+
+        mask = local & cv2.inRange(
+            lightness,
+            OBSTACLE_MIN_ABSOLUTE_LIGHTNESS,
             255,
         )
 
         mask &= cv2.inRange(
-            saturation,
+            chroma,
             0,
-            OBSTACLE_COARSE_SATURATION,
+            OBSTACLE_COARSE_CHROMA_MAX,
         )
 
         mask &= self._roi
@@ -277,6 +340,13 @@ class Detector:
             mask, cv2.MORPH_CLOSE, self._close_kernel
         )
 
+        # Patches a glare highlight punched through the middle of a
+        # sticker, or a thin specular streak that splits one blob
+        # into two, without touching a real gap (e.g. a ball or a
+        # hand actually covering part of it), which stays open to
+        # the mask's edge and so is left alone.
+        mask = imaging.fill_holes(mask)
+
         contours, _ = cv2.findContours(
             mask,
             cv2.RETR_EXTERNAL,
@@ -288,8 +358,8 @@ class Detector:
         for contour in contours:
             candidate = self._analyze(
                 contour,
-                value,
-                saturation,
+                lightness,
+                chroma,
                 blank,
             )
 
@@ -297,6 +367,35 @@ class Detector:
                 candidates.append(candidate)
 
         return candidates
+
+    def _adaptive_block_size(self):
+        """
+        Neighborhood size (detection-scale px, always odd) for the
+        local brightness threshold above. Tied to the sticker's own
+        short side (once known) so the neighborhood sampled around a
+        sticker is mostly black screen rather than the sticker's own
+        bright pixels, which would otherwise drag the local average
+        up and make the sticker fail to stand out against itself.
+        """
+        if self._expected is not None:
+            short_side = min(self._expected)
+        else:
+            short_side = OBSTACLE_ADAPTIVE_DEFAULT_SHORT_SIDE
+
+        size = int(
+            round(
+                short_side
+                * self.scale
+                * OBSTACLE_ADAPTIVE_BLOCK_SPAN
+            )
+        )
+
+        size = max(15, size)
+
+        if size % 2 == 0:
+            size += 1
+
+        return size
 
     def _painted_blank_mask(self):
         """
@@ -353,7 +452,7 @@ class Detector:
     # 2 + 3. Refine one blob and measure it
     # ========================================================
 
-    def _analyze(self, contour, value, saturation, blank):
+    def _analyze(self, contour, lightness, chroma, blank):
         area_px = cv2.contourArea(contour)
 
         # Loose pre-gate on the coarse blob (the refined blob is
@@ -376,8 +475,8 @@ class Detector:
         x1 = min(self.det_width, x + w + pad)
         y1 = min(self.det_height, y + h + pad)
 
-        crop_value = value[y0:y1, x0:x1]
-        crop_sat = saturation[y0:y1, x0:x1]
+        crop_light = lightness[y0:y1, x0:x1]
+        crop_chroma = chroma[y0:y1, x0:x1]
         crop_roi = self._roi[y0:y1, x0:x1]
 
         crop_blank = (
@@ -386,12 +485,12 @@ class Detector:
 
         shifted = contour - np.array([[[x0, y0]]], np.int32)
 
-        coarse_fill = np.zeros(crop_value.shape, np.uint8)
+        coarse_fill = np.zeros(crop_light.shape, np.uint8)
 
         cv2.drawContours(coarse_fill, [shifted], -1, 255, -1)
 
-        inside = crop_value[coarse_fill > 0]
-        outside = crop_value[coarse_fill == 0]
+        inside = crop_light[coarse_fill > 0]
+        outside = crop_light[coarse_fill == 0]
 
         if inside.size == 0 or outside.size < 8:
             return None
@@ -404,12 +503,12 @@ class Detector:
         level = max(
             background
             + OBSTACLE_EDGE_LEVEL * (plateau - background),
-            float(OBSTACLE_COARSE_BRIGHTNESS),
+            float(OBSTACLE_MIN_ABSOLUTE_LIGHTNESS),
         )
 
-        refined = cv2.inRange(crop_value, level, 255)
+        refined = cv2.inRange(crop_light, level, 255)
         refined &= cv2.inRange(
-            crop_sat, 0, OBSTACLE_COARSE_SATURATION
+            crop_chroma, 0, OBSTACLE_COARSE_CHROMA_MAX
         )
         refined &= crop_roi
 
@@ -487,7 +586,7 @@ class Detector:
 
         solidity = area2_px / hull_area
 
-        fill = np.zeros(crop_value.shape, np.uint8)
+        fill = np.zeros(crop_light.shape, np.uint8)
 
         cv2.drawContours(fill, [contour2], -1, 255, -1)
 
@@ -496,12 +595,12 @@ class Detector:
         if not inner.any():
             inner = fill
 
-        mean_value = float(cv2.mean(crop_value, mask=inner)[0])
-        mean_sat = float(cv2.mean(crop_sat, mask=inner)[0])
+        mean_light = float(cv2.mean(crop_light, mask=inner)[0])
+        mean_chroma = float(cv2.mean(crop_chroma, mask=inner)[0])
 
-        _, std = cv2.meanStdDev(crop_value, mask=inner)
+        _, std = cv2.meanStdDev(crop_light, mask=inner)
 
-        value_std = float(std[0][0])
+        light_std = float(std[0][0])
 
         # Ring just outside the blob must be dark (black screen).
         ring_kernel = np.ones(
@@ -518,7 +617,7 @@ class Detector:
         ring_count = int(np.count_nonzero(ring_mask))
 
         if ring_count >= 12:
-            dark = crop_value[ring_mask > 0] < (mean_value * 0.5)
+            dark = crop_light[ring_mask > 0] < (mean_light * 0.5)
 
             dark_ratio = float(np.count_nonzero(dark)) / ring_count
         else:
@@ -550,9 +649,9 @@ class Detector:
             "aspect": float(aspect),
             "rectangularity": float(rectangularity),
             "solidity": float(solidity),
-            "brightness": mean_value,
-            "saturation": mean_sat,
-            "std": value_std,
+            "brightness": mean_light,
+            "chroma": mean_chroma,
+            "std": light_std,
             "dark_ratio": dark_ratio,
             "clipped": clipped,
         }
@@ -590,7 +689,7 @@ class Detector:
         if c["brightness"] < MIN_OBSTACLE_BRIGHTNESS * factor:
             return False, False
 
-        if c["saturation"] > MAX_OBSTACLE_SATURATION / factor:
+        if c["chroma"] > MAX_OBSTACLE_CHROMA / factor:
             return False, False
 
         if c["std"] > MAX_OBSTACLE_BRIGHTNESS_STD / factor:

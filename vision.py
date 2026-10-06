@@ -166,6 +166,14 @@ class Vision:
                         DETECTION_SCALE,
                     )
 
+                    # Keep the sticker detector's idea of "what does
+                    # white look like right now" in sync with what
+                    # calibration is continuously learning off the
+                    # ring - see Calibration.white_reference().
+                    self.detector.set_white_reference(
+                        self.calibration.white_reference()
+                    )
+
                     obstacles = self.detector.detect(small)
 
                     last_obstacle_pass = time.monotonic()

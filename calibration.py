@@ -5,6 +5,8 @@ import math
 import cv2
 import numpy as np
 
+import imaging
+
 from config import (
     SCREEN_WIDTH,
     SCREEN_HEIGHT,
@@ -15,8 +17,11 @@ from config import (
     CALIBRATION_ADAPTIVE_HUE_ENABLED,
     CALIBRATION_ADAPTIVE_HUE_BLEND,
     CALIBRATION_ADAPTIVE_MAX_DRIFT_DEGREES,
-    CALIBRATION_WHITE_S_MAX,
-    CALIBRATION_WHITE_V_MIN,
+    CALIBRATION_WHITE_ADAPTIVE_OFFSET,
+    CALIBRATION_WHITE_MIN_ABSOLUTE_LIGHTNESS,
+    CALIBRATION_WHITE_MAX_GREEN_DOMINANCE,
+    CALIBRATION_WHITE_REFERENCE_BLEND,
+    CALIBRATION_WHITE_REFERENCE_MAX_OFFSET,
     CALIBRATION_MIN_SCREEN_AREA_RATIO,
     CALIBRATION_MAX_SCREEN_AREA_RATIO,
     CALIBRATION_MIN_OUTER_TARGET_RATIO,
@@ -100,6 +105,18 @@ class Calibration:
         # changed, so there is no reason to throw this away with it.
         self._learned_hue_center = None
 
+        # What the camera ACTUALLY records for the white inner ring
+        # right now, as a (a*, b*) offset from LAB neutral (128,
+        # 128) - i.e. exactly what a photographer gets by custom
+        # white-balancing off a gray card, except sampled
+        # continuously off the ring that is drawn every single
+        # frame anyway. detection.py uses this to judge how "white"
+        # a candidate sticker really is relative to what white
+        # currently looks like to this camera, instead of relative
+        # to an absolute assumption that colored ambient light can
+        # never actually hold true. Also never cleared by reset().
+        self._white_reference_ab = None
+
         self.failed_frame_count = 0
 
     # ========================================================
@@ -148,6 +165,8 @@ class Calibration:
             return self.is_calibrated()
 
         self.failed_frame_count = 0
+
+        self._update_white_reference(candidate.get("white_ab"))
 
         points = candidate["points"]
         hue = candidate.get("hue_degrees")
@@ -238,8 +257,10 @@ class Calibration:
             cv2.COLOR_BGR2HSV,
         )
 
+        lightness, a_channel, b_channel = imaging.to_lab(frame)
+
         target_mask = self._make_target_mask(frame, hsv)
-        white_mask = self._make_white_mask(hsv)
+        white_mask = self._make_white_mask(frame)
 
         contours, _ = cv2.findContours(
             target_mask,
@@ -247,15 +268,12 @@ class Calibration:
             cv2.CHAIN_APPROX_SIMPLE,
         )
 
-        outer_frac = (
-            CALIBRATION_OUTER_BORDER_SIZE
-            / float(SCREEN_WIDTH)
-        )
+        outer_depth = float(CALIBRATION_OUTER_BORDER_SIZE)
 
-        inner_frac = (
+        inner_depth = float(
             CALIBRATION_OUTER_BORDER_SIZE
             + CALIBRATION_INNER_BORDER_SIZE
-        ) / float(SCREEN_WIDTH)
+        )
 
         best = None
 
@@ -280,7 +298,7 @@ class Calibration:
                 target_mask,
                 quad,
                 0.0,
-                outer_frac,
+                outer_depth,
             )
 
             if (
@@ -292,8 +310,8 @@ class Calibration:
             white_ratio = self._band_ratio(
                 white_mask,
                 quad,
-                outer_frac,
-                inner_frac,
+                outer_depth,
+                inner_depth,
             )
 
             if (
@@ -326,7 +344,15 @@ class Calibration:
                         target_mask,
                         quad,
                         0.0,
-                        outer_frac,
+                        outer_depth,
+                    ),
+                    "white_ab": self._band_mean_ab(
+                        a_channel,
+                        b_channel,
+                        white_mask,
+                        quad,
+                        outer_depth,
+                        inner_depth,
                     ),
                 }
 
@@ -480,9 +506,10 @@ class Calibration:
         """
         Finds the calibration green robustly under unpredictable,
         possibly-shifting exhibition lighting, by combining a loose
-        pre-filter with a per-frame auto-threshold rather than one
-        fixed HSV box (see config.py's "Target-color detection"
-        section and the class docstring for the full reasoning).
+        hue pre-filter with a per-frame auto-threshold on a
+        brightness-INVARIANT color signal, rather than one fixed
+        HSV box (see config.py's "Target-color detection" section
+        and the class docstring for the full reasoning).
         """
         pre_filter = self._make_hue_prefilter_mask(hsv)
 
@@ -491,6 +518,22 @@ class Calibration:
             # meaningful split for Otsu to find, so don't ask it to
             # invent one out of noise.
             return self._clean_mask(pre_filter)
+
+        # The "how green is this pixel" signal is measured on LAB's
+        # a* axis (green-red), NOT by comparing raw R/G/B levels.
+        # LAB deliberately separates brightness (L) from true color
+        # (a, b), so a* barely moves when a glare highlight, a
+        # shadow, or the camera's own auto-exposure/white-balance
+        # changes how BRIGHT a pixel looks - which is most of what
+        # "the camera doesn't quite see what the monitor shows"
+        # actually is. Comparing raw channel levels (as a plain
+        # "G minus R/B" measure would) conflates color with
+        # brightness and is far more easily fooled by exactly that.
+        _lightness, a_channel, _b_channel = imaging.to_lab(
+            frame_bgr
+        )
+
+        dominance = imaging.green_dominance(a_channel)
 
         # Otsu needs to see BOTH classes to find a meaningful split
         # point - "pattern green" and "everything else" - so it is
@@ -502,8 +545,6 @@ class Calibration:
         # Otsu an almost-uniform population with no real second
         # class to split against, which produces a meaningless
         # threshold instead of an adaptive one.
-        dominance = self._green_dominance(frame_bgr)
-
         threshold, _ = cv2.threshold(
             dominance,
             0,
@@ -525,7 +566,17 @@ class Calibration:
         # not).
         mask = cv2.bitwise_and(pre_filter, strong)
 
-        return self._clean_mask(mask)
+        mask = self._clean_mask(mask)
+
+        # A specular glare spot on the monitor's glass can punch a
+        # small hole clean through the middle of the pattern, or
+        # even a thin streak that splits it into two separate
+        # blobs. Filling any fully-enclosed hole (see
+        # imaging.fill_holes) repairs exactly that without touching
+        # a real gap caused by, say, a person actually standing in
+        # front of part of the screen (which stays open to the
+        # mask's edge and so is left alone).
+        return imaging.fill_holes(mask)
 
     def _make_hue_prefilter_mask(self, hsv):
         center = self._effective_hue_center()
@@ -560,27 +611,6 @@ class Calibration:
         return mask
 
     @staticmethod
-    def _green_dominance(frame_bgr):
-        """
-        "Excess green": how far the green channel exceeds the
-        stronger of red/blue, per pixel, clipped to [0, 255]. This
-        is a RELATIVE measure (G vs. R/B), not an absolute
-        brightness or saturation level, so it survives exposure and
-        white-balance shifts far better than a fixed HSV threshold
-        - the same trick used for chroma-keying and for segmenting
-        vegetation in outdoor photos under unpredictable sunlight.
-        """
-        frame = frame_bgr.astype(np.int16)
-
-        blue = frame[:, :, 0]
-        green = frame[:, :, 1]
-        red = frame[:, :, 2]
-
-        dominance = green - np.maximum(red, blue)
-
-        return np.clip(dominance, 0, 255).astype(np.uint8)
-
-    @staticmethod
     def _hue_ranges(center_degrees, tolerance_degrees):
         """
         A (center +/- tolerance) window in standard 0-360 degree
@@ -613,17 +643,55 @@ class Calibration:
             for lo, hi in spans
         ]
 
-    def _make_white_mask(self, hsv):
-        mask = cv2.inRange(
-            hsv,
-            np.array(
-                [0, 0, CALIBRATION_WHITE_V_MIN],
-                dtype=np.uint8,
-            ),
-            np.array(
-                [179, CALIBRATION_WHITE_S_MAX, 255],
-                dtype=np.uint8,
-            ),
+    def _make_white_mask(self, frame_bgr):
+        """
+        Finds the white inner ring the same way detection.py finds
+        white stickers (see its module docstring): LOCALLY adaptive
+        brightness rather than one fixed V floor for the whole frame
+        (so a ring sitting in a dimmer part of the hall is still
+        found), and LAB chroma rather than HSV saturation for "is
+        this actually neutral" (stable across the whole brightness
+        range, unlike HSV's saturation ratio). A fixed absolute HSV
+        box here was exactly as fragile under real exhibition
+        lighting as the old fixed box was for stickers.
+        """
+        lightness, a_channel, _b_channel = imaging.to_lab(
+            frame_bgr
+        )
+
+        block = self._white_ring_adaptive_block_size(
+            lightness.shape
+        )
+
+        local = cv2.adaptiveThreshold(
+            lightness,
+            255,
+            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY,
+            block,
+            -CALIBRATION_WHITE_ADAPTIVE_OFFSET,
+        )
+
+        mask = local & cv2.inRange(
+            lightness,
+            CALIBRATION_WHITE_MIN_ABSOLUTE_LIGHTNESS,
+            255,
+        )
+
+        # The only other bright thing near the white ring is the
+        # outer green ring itself, bleeding in right at the band
+        # boundary - so it is enough to exclude anything clearly
+        # GREEN-dominant (one-sided), rather than pinning an exact
+        # "how white" chroma number. A strong ambient color cast can
+        # push even genuinely white paper's overall chroma quite
+        # far (see config.py's comment), but it does not make white
+        # look GREEN - a one-sided test stays reliable under warm,
+        # cool, or any other cast a two-sided chroma ceiling cannot
+        # universally cover.
+        mask &= cv2.inRange(
+            imaging.green_dominance(a_channel),
+            0,
+            CALIBRATION_WHITE_MAX_GREEN_DOMINANCE,
         )
 
         kernel = cv2.getStructuringElement(
@@ -636,6 +704,22 @@ class Calibration:
             cv2.MORPH_CLOSE,
             kernel,
         )
+
+    @staticmethod
+    def _white_ring_adaptive_block_size(shape):
+        # Tied to the frame's own size (calibration has no learned
+        # "ring thickness" the way detection.py learns sticker
+        # size), large enough that the sampled neighborhood is
+        # mostly the ring's dark/green surroundings rather than the
+        # ring's own pixels.
+        size = int(round(min(shape[:2]) * 0.05))
+
+        size = max(15, size)
+
+        if size % 2 == 0:
+            size += 1
+
+        return size
 
     def _clean_mask(self, mask):
         open_kernel = cv2.getStructuringElement(
@@ -699,12 +783,34 @@ class Calibration:
     # outer pink contour alone)
     # ========================================================
 
+    # points is always [top_left, top_right, bottom_right,
+    # bottom_left] (see _order_points), so edge 0 (top) and edge 2
+    # (bottom) run the screen's WIDTH and edge 1 (right) and edge 3
+    # (left) run its HEIGHT. An absolute screen-space pixel depth
+    # (e.g. CALIBRATION_OUTER_BORDER_SIZE) converts to that edge's
+    # own camera-space pixels via (edge's camera length / that
+    # edge's TRUE screen-space length) - using the same reference
+    # (SCREEN_WIDTH) for every edge, as if top/bottom and left/right
+    # were interchangeable, silently undersizes the left/right band
+    # whenever the screen isn't exactly square, which in practice is
+    # always: a 1920x1080 screen's left/right edges are only
+    # 1080/1920 as long as its top/bottom edges, so a band meant to
+    # be the same physical width on every side would come out
+    # visibly too shallow on the sides, easily shallow enough to
+    # land entirely short of where the white ring actually starts.
+    _EDGE_REFERENCE_LENGTH = (
+        SCREEN_WIDTH,
+        SCREEN_HEIGHT,
+        SCREEN_WIDTH,
+        SCREEN_HEIGHT,
+    )
+
     def _band_ratio(
         self,
         mask,
         points,
-        frac_start,
-        frac_end,
+        depth_start_px,
+        depth_end_px,
     ):
         center = np.mean(points, axis=0)
 
@@ -720,8 +826,14 @@ class Calibration:
             if length < 1:
                 continue
 
-            depth_start = length * frac_start
-            depth_end = length * frac_end
+            reference = self._EDGE_REFERENCE_LENGTH[i]
+
+            depth_start = (
+                depth_start_px * length / reference
+            )
+            depth_end = (
+                depth_end_px * length / reference
+            )
 
             if depth_end <= depth_start:
                 continue
@@ -786,13 +898,14 @@ class Calibration:
     def _band_polygon_mask(
         self,
         points,
-        frac_start,
-        frac_end,
+        depth_start_px,
+        depth_end_px,
         shape,
     ):
         """
-        Same ring-band geometry as _band_ratio above, but returned
-        as a single combined mask (union of the 4 edge trapezoids)
+        Same ring-band geometry as _band_ratio above (including the
+        same per-edge reference-length correction), but returned as
+        a single combined mask (union of the 4 edge trapezoids)
         instead of an averaged ratio - used for pooling pixels
         together (e.g. to measure their mean hue) rather than just
         counting them.
@@ -813,8 +926,14 @@ class Calibration:
             if length < 1:
                 continue
 
-            depth_start = length * frac_start
-            depth_end = length * frac_end
+            reference = self._EDGE_REFERENCE_LENGTH[i]
+
+            depth_start = (
+                depth_start_px * length / reference
+            )
+            depth_end = (
+                depth_end_px * length / reference
+            )
 
             if depth_end <= depth_start:
                 continue
@@ -864,8 +983,8 @@ class Calibration:
         hsv,
         color_mask,
         points,
-        frac_start,
-        frac_end,
+        depth_start_px,
+        depth_end_px,
     ):
         """
         Mean hue (0-360 degrees) of the pixels that are BOTH inside
@@ -876,8 +995,8 @@ class Calibration:
         """
         band = self._band_polygon_mask(
             points,
-            frac_start,
-            frac_end,
+            depth_start_px,
+            depth_end_px,
             hsv.shape[:2],
         )
 
@@ -901,6 +1020,41 @@ class Calibration:
             cv2.bitwise_and(color_mask, fill),
         )
 
+    def _band_mean_ab(
+        self,
+        a_channel,
+        b_channel,
+        color_mask,
+        points,
+        depth_start_px,
+        depth_end_px,
+    ):
+        """
+        Mean LAB (a*, b*) of the pixels that are BOTH inside the
+        given ring band AND already matched by color_mask - used to
+        learn what the camera currently records for a KNOWN-white
+        surface (see white_reference / _update_white_reference).
+        """
+        band = self._band_polygon_mask(
+            points,
+            depth_start_px,
+            depth_end_px,
+            a_channel.shape[:2],
+        )
+
+        if band is None:
+            return None
+
+        combined = cv2.bitwise_and(color_mask, band)
+
+        if cv2.countNonZero(combined) < 32:
+            return None
+
+        mean_a = cv2.mean(a_channel, mask=combined)[0]
+        mean_b = cv2.mean(b_channel, mask=combined)[0]
+
+        return float(mean_a), float(mean_b)
+
     @staticmethod
     def _masked_mean_hue(hsv, mask):
         # A minimum pixel count keeps a tiny sliver of matched
@@ -915,6 +1069,72 @@ class Calibration:
         )[0]
 
         return float(mean_hue_cv_units) * 2.0
+
+    # ========================================================
+    # Live white reference ("gray card" for the sticker detector)
+    # ========================================================
+
+    def white_reference(self):
+        """
+        (a*, b*) in LAB's 0-255 encoding (128 = neutral) that the
+        camera is CURRENTLY recording for the calibration ring's
+        white band, or None before enough samples have come in.
+        detection.py measures how "white" a candidate sticker is
+        relative to this, instead of relative to absolute LAB
+        neutral - exactly like a photographer custom white-balancing
+        off a gray card, except this one is sampled continuously off
+        the ring that is drawn on the monitor every single frame
+        anyway, so it tracks the room's actual current lighting
+        automatically rather than needing to be re-tuned on-site.
+        """
+        return self._white_reference_ab
+
+    def _update_white_reference(self, measured_ab):
+        if measured_ab is None:
+            return
+
+        measured_a, measured_b = measured_ab
+
+        if self._white_reference_ab is None:
+            self._white_reference_ab = (measured_a, measured_b)
+            return
+
+        current_a, current_b = self._white_reference_ab
+
+        blended_a = (
+            current_a
+            + CALIBRATION_WHITE_REFERENCE_BLEND
+            * (measured_a - current_a)
+        )
+        blended_b = (
+            current_b
+            + CALIBRATION_WHITE_REFERENCE_BLEND
+            * (measured_b - current_b)
+        )
+
+        # A real color cast from room lighting is a gentle, physical
+        # effect - it should never push "white" wildly far from
+        # actual neutral. Clamping the offset's magnitude keeps a
+        # run of bad samples (someone's bright shirt briefly
+        # overlapping the band, say) from teaching the sticker
+        # detector a wildly wrong idea of white.
+        offset_a = blended_a - 128.0
+        offset_b = blended_b - 128.0
+
+        magnitude = math.hypot(offset_a, offset_b)
+
+        limit = CALIBRATION_WHITE_REFERENCE_MAX_OFFSET
+
+        if magnitude > limit:
+            scale = limit / magnitude
+
+            offset_a *= scale
+            offset_b *= scale
+
+        self._white_reference_ab = (
+            128.0 + offset_a,
+            128.0 + offset_b,
+        )
 
     # ========================================================
     # Hue learning

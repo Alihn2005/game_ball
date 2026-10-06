@@ -73,7 +73,7 @@ class Renderer:
     def __init__(self):
         # Ask SDL to place the (borderless) window at the top-left
         # corner so it lines up exactly with the screen.
-        os.environ.setdefault("SDL_VIDEO_CENTERED", "1")
+        os.environ.setdefault("SDL_VIDEO_WINDOW_POS", "0,0")
 
         pygame.init()
 
@@ -84,11 +84,17 @@ class Renderer:
         # Exclusive SDL fullscreen needs a real video-mode switch,
         # which is unreliable on several X11/Wayland/XWayland driver
         # combinations (blank frames, crashes on exit).
-        self.fullscreen = False
-
         self.screen = pygame.display.set_mode(
-            (SCREEN_WIDTH, SCREEN_HEIGHT)
+            (SCREEN_WIDTH, SCREEN_HEIGHT),
+            pygame.NOFRAME,
         )
+
+        pygame.mouse.set_visible(False)
+
+        try:
+            pygame.event.set_grab(True)
+        except Exception:
+            pass
 
         # SDL2 turns "text input mode" on by default, which on
         # systems with an active IME can swallow certain keys
@@ -125,31 +131,41 @@ class Renderer:
         self._glow_cache = {}
         self._color_cache = {}
 
-    def toggle_fullscreen(self):
-        self.fullscreen = not self.fullscreen
+    def _build_background(self):
+        # The permanent calibration border (pink outer ring, white
+        # inner ring) around a black interior, rendered once.
+        outer = CALIBRATION_OUTER_BORDER_SIZE
+        inner = CALIBRATION_INNER_BORDER_SIZE
+        total = outer + inner
 
-        if self.fullscreen:
-            self.screen = pygame.display.set_mode(
-                (SCREEN_WIDTH, SCREEN_HEIGHT),
-                pygame.FULLSCREEN,
-            )
-        else:
-            self.screen = pygame.display.set_mode(
-                (SCREEN_WIDTH, SCREEN_HEIGHT),
-            )
-
-        self._screen_rect = pygame.Rect(
-            0,
-            0,
-            SCREEN_WIDTH,
-            SCREEN_HEIGHT,
+        surface = pygame.Surface(
+            (SCREEN_WIDTH, SCREEN_HEIGHT)
         )
 
-        self.force_full_repaint()
-        
-    def _build_background(self):
-        surface = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT))
-        surface.fill(BACKGROUND_COLOR)
+        surface.fill(CALIBRATION_PATTERN_OUTER_COLOR)
+
+        pygame.draw.rect(
+            surface,
+            CALIBRATION_PATTERN_INNER_COLOR,
+            (
+                outer,
+                outer,
+                SCREEN_WIDTH - 2 * outer,
+                SCREEN_HEIGHT - 2 * outer,
+            ),
+        )
+
+        pygame.draw.rect(
+            surface,
+            BACKGROUND_COLOR,
+            (
+                total,
+                total,
+                SCREEN_WIDTH - 2 * total,
+                SCREEN_HEIGHT - 2 * total,
+            ),
+        )
+
         return surface.convert()
 
     # ========================================================
