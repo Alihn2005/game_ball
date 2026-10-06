@@ -73,7 +73,7 @@ class Renderer:
     def __init__(self):
         # Ask SDL to place the (borderless) window at the top-left
         # corner so it lines up exactly with the screen.
-        os.environ.setdefault("SDL_VIDEO_WINDOW_POS", "0,0")
+        os.environ.setdefault("SDL_VIDEO_CENTERED", "1")
 
         pygame.init()
 
@@ -89,13 +89,6 @@ class Renderer:
         self.screen = pygame.display.set_mode(
             (SCREEN_WIDTH, SCREEN_HEIGHT)
         )
-
-        pygame.mouse.set_visible(False)
-
-        try:
-            pygame.event.set_grab(True)
-        except Exception:
-            pass
 
         # SDL2 turns "text input mode" on by default, which on
         # systems with an active IME can swallow certain keys
@@ -138,11 +131,11 @@ class Renderer:
         if self.fullscreen:
             self.screen = pygame.display.set_mode(
                 (SCREEN_WIDTH, SCREEN_HEIGHT),
-                pygame.NOFRAME,
+                pygame.FULLSCREEN,
             )
         else:
             self.screen = pygame.display.set_mode(
-                (SCREEN_WIDTH, SCREEN_HEIGHT)
+                (SCREEN_WIDTH, SCREEN_HEIGHT),
             )
 
         self._screen_rect = pygame.Rect(
@@ -153,7 +146,7 @@ class Renderer:
         )
 
         self.force_full_repaint()
-    
+        
     def _build_background(self):
         surface = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT))
         surface.fill(BACKGROUND_COLOR)
