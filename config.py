@@ -148,6 +148,19 @@ PHYSICS_MAX_STEP_SECONDS = 1.0 / 240.0
 
 
 # ============================================================
+# Visual Ball Launcher
+# ============================================================
+
+LAUNCHER_ENABLED = True
+LAUNCHER_SWEEP_ANGLE_DEGREES = 70.0
+LAUNCHER_SWEEP_SPEED = 0.35
+LAUNCHER_BARREL_LENGTH = 56.0
+LAUNCHER_BARREL_WIDTH = 34.0
+LAUNCH_BALL_SPEED = 450.0
+
+
+
+# ============================================================
 # Ball spawning and stuck balls
 # ============================================================
 
@@ -156,12 +169,13 @@ BALL_SPAWN_INTERVAL_SECONDS = BALL_SPAWN_INTERVAL
 
 MAX_SIMULTANEOUS_BALLS = 12
 
-BALL_SPAWN_RANDOM_X = True
+BALL_SPAWN_RANDOM_X = False
 BALL_SPAWN_MARGIN = 120
-BALL_SPAWN_VELOCITY_JITTER = 60.0
+BALL_SPAWN_VELOCITY_JITTER = 30.0
 
 BALL_STUCK_DISTANCE = 30.0
 BALL_STUCK_TIMEOUT_SECONDS = 8.0
+
 
 BALL_LIFETIME = 10.0
 BALL_MAX_LIFETIME_SECONDS = BALL_LIFETIME

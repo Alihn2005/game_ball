@@ -49,7 +49,11 @@ from config import (
     DETECTED_OBSTACLE_COLOR,
     DETECTED_OBSTACLE_BORDER_WIDTH,
     DETECTED_OBSTACLE_PAINT_INSET_RATIO,
+    LAUNCHER_ENABLED,
+    LAUNCHER_BARREL_LENGTH,
+    LAUNCHER_BARREL_WIDTH,
 )
+
 
 
 # Side length (px) of one dirty-repaint cell.
@@ -197,7 +201,7 @@ class Renderer:
     # Main rendering
     # ========================================================
 
-    def render(self, balls, obstacles, effects=None):
+    def render(self, balls, obstacles, effects=None, physics_world=None):
         now = time.monotonic()
 
         self._sync_obstacles(obstacles)
@@ -221,13 +225,13 @@ class Renderer:
         )
 
         if full:
-            self._paint_full(cell_items, now)
+            self._paint_full(cell_items, now, physics_world)
         else:
-            self._paint_dirty(cell_items)
+            self._paint_dirty(cell_items, physics_world)
 
         self._prev_cells = set(cell_items)
 
-    def _paint_full(self, cell_items, now):
+    def _paint_full(self, cell_items, now, physics_world=None):
         screen = self.screen
 
         screen.set_clip(None)
@@ -262,6 +266,8 @@ class Renderer:
         for _layer, draw in ordered:
             self._draw_item(draw)
 
+        self._draw_launcher(physics_world)
+
         pygame.display.flip()
 
         self._need_full = False
@@ -269,14 +275,24 @@ class Renderer:
         self._last_full = now
         self._obstacle_dirty = set()
 
-    def _paint_dirty(self, cell_items):
+    def _paint_dirty(self, cell_items, physics_world=None):
         screen = self.screen
         background = self._background
+
+        # Bounding box of the rotating launcher at top center
+        launcher_rect = pygame.Rect(
+            int(SCREEN_WIDTH / 2.0 - 80),
+            0,
+            160,
+            95,
+        )
+        launcher_cells = set(self._cells_for(launcher_rect))
 
         dirty = (
             set(cell_items)
             | self._prev_cells
             | self._obstacle_dirty
+            | launcher_cells
         )
 
         self._obstacle_dirty = set()
@@ -307,9 +323,65 @@ class Renderer:
                     self._draw_item(draw)
 
         screen.set_clip(None)
+        self._draw_launcher(physics_world)
 
         if rects:
             pygame.display.update(rects)
+
+    def _draw_launcher(self, physics_world):
+        if not LAUNCHER_ENABLED or physics_world is None:
+            return
+
+        cx = SCREEN_WIDTH / 2.0
+        cy = 0.0
+        angle = physics_world.launcher_angle
+
+        cos_a = math.cos(angle)
+        sin_a = math.sin(angle)
+
+        length = LAUNCHER_BARREL_LENGTH
+        half_w = LAUNCHER_BARREL_WIDTH / 2.0
+
+        # Solid tube barrel extends from local y = -20.0 (above screen y=0) to y = length
+        local_pts = [
+            (-half_w, -20.0),
+            (half_w, -20.0),
+            (half_w, length),
+            (-half_w, length),
+        ]
+
+        world_pts = []
+        for lx, ly in local_pts:
+            wx = cx + lx * cos_a + ly * sin_a
+            wy = cy - lx * sin_a + ly * cos_a
+            world_pts.append((int(round(wx)), int(round(wy))))
+
+        # Solid metallic fill and cyan rim
+        pygame.draw.polygon(self.screen, (34, 40, 50), world_pts)
+        pygame.draw.polygon(self.screen, (0, 200, 255), world_pts, 2)
+
+        # Subtle inner shading stripe along tube
+        stripe_w = half_w * 0.45
+        stripe_pts = []
+        for lx, ly in [(-stripe_w, -18.0), (stripe_w, -18.0), (stripe_w, length - 3.0), (-stripe_w, length - 3.0)]:
+            wx = cx + lx * cos_a + ly * sin_a
+            wy = cy - lx * sin_a + ly * cos_a
+            stripe_pts.append((int(round(wx)), int(round(wy))))
+        pygame.draw.polygon(self.screen, (18, 22, 28), stripe_pts)
+
+        # Visible Nozzle Ring / Mouth Tip
+        nozzle_cx = cx + length * sin_a
+        nozzle_cy = cy + length * cos_a
+
+        pygame.draw.circle(
+            self.screen,
+            (0, 230, 255),
+            (int(round(nozzle_cx)), int(round(nozzle_cy))),
+            int(round(half_w * 0.9)),
+            3,
+        )
+
+
 
     # ========================================================
     # Grid helpers

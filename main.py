@@ -58,6 +58,7 @@ class Game:
             GAME_WIDTH,
             GAME_HEIGHT,
         )
+        
 
         self.effects = Effects()
 
@@ -153,7 +154,9 @@ class Game:
             self.physics.balls,
             obstacles,
             self.effects,
+            self.physics,
         )
+
 
     # ========================================================
     # Warnings

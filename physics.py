@@ -60,7 +60,14 @@ from config import (
     BALL_HUE_MIN_DEGREES,
     BALL_HUE_MAX_DEGREES,
     IMPACT_EFFECT_MIN_SPEED,
+    LAUNCHER_ENABLED,
+    LAUNCHER_SWEEP_ANGLE_DEGREES,
+    LAUNCHER_SWEEP_SPEED,
+    LAUNCHER_BARREL_LENGTH,
+    LAUNCHER_BARREL_WIDTH,
+    LAUNCH_BALL_SPEED,
 )
+
 
 
 _ROLLING_DRAG = 0.2
@@ -125,6 +132,10 @@ class PhysicsWorld:
         self._obstacle_segments = []
         self._solid_source = None
 
+        # Launcher state
+        self.launcher_time = 0.0
+        self.launcher_angle = 0.0
+
         # Build closed outer boundary segments around the screen
         self._boundary_segments = build_boundary_segments(self.width, self.height)
 
@@ -133,7 +144,38 @@ class PhysicsWorld:
             BALL_HUE_MIN_DEGREES,
             BALL_HUE_MAX_DEGREES,
         )
-        
+
+    def get_nozzle_transform(self):
+        """
+        Returns (nozzle_x, nozzle_y, dir_x, dir_y, angle_rad) for launcher.
+        Pivot is at top center: (self.width / 2.0, 0.0).
+        """
+        angle = self.launcher_angle
+        pivot_x = self.width / 2.0
+        pivot_y = 0.0
+        dir_x = math.sin(angle)
+        dir_y = math.cos(angle)
+        nozzle_x = pivot_x + LAUNCHER_BARREL_LENGTH * dir_x
+        nozzle_y = pivot_y + LAUNCHER_BARREL_LENGTH * dir_y
+        return nozzle_x, nozzle_y, dir_x, dir_y, angle
+
+    def get_launcher_segments(self):
+        """
+        Constructs the 4 physical collision segments for the rotating launcher tube.
+        """
+        if not LAUNCHER_ENABLED:
+            return []
+        cx = self.width / 2.0
+        cy = 0.0
+        angle = self.launcher_angle
+        sin_a = math.sin(angle)
+        cos_a = math.cos(angle)
+        center_offset_y = (LAUNCHER_BARREL_LENGTH - 20.0) / 2.0
+        total_length = LAUNCHER_BARREL_LENGTH + 20.0
+        center_x = cx + center_offset_y * sin_a
+        center_y = cy + center_offset_y * cos_a
+        angle_deg = math.degrees(angle)
+        return obb_to_segments(center_x, center_y, total_length, LAUNCHER_BARREL_WIDTH, angle_deg)
 
     # ========================================================
     # Balls
@@ -165,7 +207,7 @@ class PhysicsWorld:
 
     def spawn_ball(self):
         """
-        Drops one new ball in from near the top of the screen.
+        Spawns a new ball directly from the launcher nozzle.
         Returns the ball, or None if blocked or too many balls already.
         """
         if self.live_ball_count() >= MAX_SIMULTANEOUS_BALLS:
@@ -180,6 +222,43 @@ class PhysicsWorld:
                 BALL_RADIUS_VARIATION,
             )
         )
+
+        if LAUNCHER_ENABLED:
+            nx, ny, dx, dy, angle = self.get_nozzle_transform()
+            # Spawn ball slightly outside nozzle tip so it doesn't collide with nozzle
+            spawn_offset = radius + 4.0
+            spawn_x = nx + dx * spawn_offset
+            spawn_y = ny + dy * spawn_offset
+
+            vx = dx * LAUNCH_BALL_SPEED
+            vy = dy * LAUNCH_BALL_SPEED
+
+            ball = Ball(
+                x=spawn_x,
+                y=spawn_y,
+                radius=radius,
+                velocity_x=vx,
+                velocity_y=vy,
+                gravity=BALL_GRAVITY,
+                hue=self._next_hue(),
+            )
+
+            self.balls.append(ball)
+
+            if len(self.events) < _MAX_EVENTS_PER_FRAME:
+                self.events.append(
+                    (
+                        "launch",
+                        nx,
+                        ny,
+                        dx,
+                        dy,
+                        LAUNCH_BALL_SPEED,
+                        ball,
+                    )
+                )
+
+            return ball
 
         for _ in range(8):
             if BALL_SPAWN_RANDOM_X:
@@ -256,6 +335,14 @@ class PhysicsWorld:
             return
 
         delta_time = min(delta_time, 0.05)
+
+        if LAUNCHER_ENABLED:
+            self.launcher_time += delta_time
+            max_rad = math.radians(LAUNCHER_SWEEP_ANGLE_DEGREES)
+            self.launcher_angle = max_rad * math.sin(
+                2.0 * math.pi * LAUNCHER_SWEEP_SPEED * self.launcher_time
+            )
+
         self.set_obstacles(obstacles)
 
         movers = [
@@ -280,7 +367,12 @@ class PhysicsWorld:
         self._housekeeping(delta_time)
 
     def _step(self, movers, h):
-        all_segments = self._obstacle_segments + self._boundary_segments
+        all_segments = (
+            self._obstacle_segments
+            + self._boundary_segments
+            + self.get_launcher_segments()
+        )
+
 
         for ball in movers:
             ball.velocity_y += ball.gravity * h
